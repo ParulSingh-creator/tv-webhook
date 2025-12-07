@@ -11,7 +11,11 @@ secret_client = secretmanager.SecretManagerServiceClient()
 
 def _project_id() -> str:
     # In Cloud Run this env var is available
-    return os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    return (
+        os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or os.environ.get("GCP_PROJECT")
+        or ""
+    )
 
 def get_secret(secret_id: str) -> str:
     """
@@ -47,12 +51,11 @@ async def tradingview_webhook(request: Request):
         raise HTTPException(status_code=401, detail="Invalid secret")
 
     # --- extract top-level fields coming from TradingView --- #
-    # symbol often comes like "NSE:NIFTY" → Dhan wants just "NIFTY"
+    # symbol often comes like "NSE:NIITLTD" → Dhan wants just "NIITLTD"
     raw_symbol = str(payload.get("symbol") or "")
     tv_symbol = raw_symbol.split(":")[-1] if raw_symbol else ""
 
     tv_exchange = str(payload.get("exchange") or "NSE")
-    tv_close = str(payload.get("close") or "0")   # last price as string
 
     strategy = payload.get("strategy", {}) or {}
     action = (strategy.get("action") or "").lower()
@@ -70,25 +73,21 @@ async def tradingview_webhook(request: Request):
     # 2) Map TradingView action -> Dhan transactionType
     transaction_type = "B" if action == "buy" else "S"
 
-    # 3) Build Dhan multi_leg_order using values from TradingView JSON
+    # 3) Build Dhan multi_leg_order for EQ segment using values from TradingView
     dhan_order = {
-        "secret": expected_secret,               # same secret configured in Dhan TV webhook
+        "secret": expected_secret,                # same secret configured in Dhan TV webhook
         "alertType": "multi_leg_order",
         "order_legs": [
             {
-                "transactionType": transaction_type,         # "B" or "S"
+                "transactionType": transaction_type,   # "B" or "S"
                 "orderType": "MKT",
-                "quantity": str(abs_qty),                   # qty from TV
-                "exchange": tv_exchange or "NSE",           # from TV
-                "symbol": tv_symbol or "NIFTY",             # from TV (stripped of 'NSE:' etc.)
-                "instrument": "OPT",
+                "quantity": str(abs_qty),             # qty from TV
+                "exchange": tv_exchange or "NSE",
+                "symbol": tv_symbol,                  # e.g. "NIITLTD"
+                "instrument": "EQ",
                 "productType": "I",
                 "sort_order": "1",
-                "price": tv_close,                          # close from TV (Dhan ignores for MKT)
-                # These three we can later derive from ticker; for now still static:
-                "option_type": "CE",
-                "strike_price": "26150.0",
-                "expiry_date": "2025-12-09"
+                "price": "0"
             }
         ]
     }
