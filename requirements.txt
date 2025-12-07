@@ -1,4 +1,4 @@
 fastapi
 uvicorn[standard]
 httpx
-google-cloud-secretmanager
+google-cloud-secret-manager
