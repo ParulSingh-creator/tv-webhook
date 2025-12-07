@@ -40,11 +40,19 @@ async def tradingview_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # 1) Validate secret
+    # 1) Validate secret from TradingView
     tv_secret = payload.get("secret")
     expected_secret = get_secret("TV_WEBHOOK_SECRET")
     if tv_secret != expected_secret:
         raise HTTPException(status_code=401, detail="Invalid secret")
+
+    # --- extract top-level fields coming from TradingView --- #
+    # symbol often comes like "NSE:NIFTY" → Dhan wants just "NIFTY"
+    raw_symbol = str(payload.get("symbol") or "")
+    tv_symbol = raw_symbol.split(":")[-1] if raw_symbol else ""
+
+    tv_exchange = str(payload.get("exchange") or "NSE")
+    tv_close = str(payload.get("close") or "0")   # last price as string
 
     strategy = payload.get("strategy", {}) or {}
     action = (strategy.get("action") or "").lower()
@@ -62,22 +70,22 @@ async def tradingview_webhook(request: Request):
     # 2) Map TradingView action -> Dhan transactionType
     transaction_type = "B" if action == "buy" else "S"
 
-    # TODO: you will later compute these (symbol, strike, expiry) from your strategy logic.
-    # For now we use your example NIFTY CE order from Dhan portal:
+    # 3) Build Dhan multi_leg_order using values from TradingView JSON
     dhan_order = {
-        "secret": expected_secret,                      # same TradingView secret Dhan expects
+        "secret": expected_secret,               # same secret configured in Dhan TV webhook
         "alertType": "multi_leg_order",
         "order_legs": [
             {
-                "transactionType": transaction_type,    # "B" or "S"
+                "transactionType": transaction_type,         # "B" or "S"
                 "orderType": "MKT",
-                "quantity": str(abs_qty),               # use strategy qty from TV
-                "exchange": "NSE",
-                "symbol": "NIFTY",
+                "quantity": str(abs_qty),                   # qty from TV
+                "exchange": tv_exchange or "NSE",           # from TV
+                "symbol": tv_symbol or "NIFTY",             # from TV (stripped of 'NSE:' etc.)
                 "instrument": "OPT",
                 "productType": "I",
                 "sort_order": "1",
-                "price": "0",
+                "price": tv_close,                          # close from TV (Dhan ignores for MKT)
+                # These three we can later derive from ticker; for now still static:
                 "option_type": "CE",
                 "strike_price": "26150.0",
                 "expiry_date": "2025-12-09"
@@ -87,7 +95,7 @@ async def tradingview_webhook(request: Request):
 
     dhan_webhook_url = get_secret("DHAN_TV_WEBHOOK_URL")
 
-    # 3) Send to Dhan webhook
+    # 4) Send to Dhan webhook
     async with httpx.AsyncClient(timeout=5.0) as client:
         try:
             resp = await client.post(dhan_webhook_url, json=dhan_order)
@@ -140,7 +148,7 @@ async def refresh_dhan_token():
         )
 
     data = resp.json()
-    # According to community examples, the new token field is 'token':contentReference[oaicite:2]{index=2}
+    # New token is usually in 'token' or 'accessToken'
     new_token = data.get("token") or data.get("accessToken")
 
     if not new_token:
