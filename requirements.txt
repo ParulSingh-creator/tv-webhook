@@ -66,5 +66,16 @@ google-cloud-secret-manager
   }
 }
 
+{
+  "secret": "NzDyE",
+  "symbol": {{ticker}},
+  "strategy": {
+    "action": {{strategy.order.action}},
+    "order": {
+      "contracts": {{strategy.order.contracts}}
+    },
+    "position_size": {{strategy.position_size}}
+  }
+}
 
 
