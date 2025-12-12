@@ -123,13 +123,23 @@ async def webhook(request: Request):
     
     logger.info(f"Extracted: symbol={symbol}, action={action}")
     
+    # STEP 1: Extract raw contracts from nested structure
+    order_info = strategy.get("order", {})
+    raw_contracts = order_info.get("contracts", 0)
+    
+    # STEP 2: Calculate absolute quantity (handle negative contracts)
+    # If contracts is positive, use it; if negative, multiply by -1
     try:
-        quantity = int(strategy.get("abs_qty", 0))
+        contracts_num = float(raw_contracts)
+        quantity = int(abs(contracts_num))  # Absolute value: convert to positive if negative
     except (ValueError, TypeError):
-        logger.warning(f"❌ Invalid quantity: {strategy.get('abs_qty')}")
+        logger.warning(f"❌ Invalid quantity: {raw_contracts}")
         return {"success": False, "error": "Invalid quantity: must be a number"}
     
-    logger.info(f"Quantity: {quantity}")
+    # STEP 3: Extract position info for message
+    position_size = strategy.get("position_size", 0)
+    
+    logger.info(f"Quantity calculation: contracts={raw_contracts} → abs_qty={quantity}")
     
     if not symbol or not action or quantity <= 0:
         logger.warning(f"❌ Invalid input: symbol={symbol}, action={action}, qty={quantity}")
@@ -138,6 +148,10 @@ async def webhook(request: Request):
     if action not in ["BUY", "SELL"]:
         logger.warning(f"❌ Invalid action: {action}")
         return {"success": False, "error": "Invalid action"}
+    
+    # STEP 4: Create alert message
+    alert_message = f"{action} @ {quantity} filled on {symbol}. New strategy position is {position_size}"
+    logger.info(f"📝 Alert: {alert_message}")
     
     # Get security ID from sheet or hardcoded mapping
     sec_id = get_security_id_from_sheet(symbol)
