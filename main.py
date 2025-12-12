@@ -1,169 +1,200 @@
+"""TradingView to Dhan Webhook Bridge with Symbol Lookup"""
+
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
-import httpx
+from dhanhq import dhanhq
 import os
-from google.cloud import secretmanager
+import json
+import logging
+import csv
+from io import StringIO
+from urllib.request import urlopen
+from datetime import datetime, timedelta
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1108320935")
+ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzY1NTk5MjExLCJpYXQiOjE3NjU1MTI4MTEsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA4MzIwOTM1In0.j-Gd1HA2djfVj4bE_3WF0Ev5aEqxN3Wbuv6DkVLpqKOXhmq12pmHrQv8npuC1kJyGsKye8Qu1PmTYb3iNYtF9A")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "NzDyE")
+
+# Cache file settings
+CACHE_FILE = "/tmp/dhan_instruments_cache.csv"
+CACHE_EXPIRY_HOURS = 24
+
+SYMBOL_TO_ID = {
+    "HDFCBANK": "1333",
+    "INFY": "1594",
+    "TCS": "11536",
+    "TMPV": "3456",
+    "WHIRLPOOL": "18011",
+}
+
+
+def is_cache_valid():
+    """Check if cached instrument file is still valid"""
+    if not os.path.exists(CACHE_FILE):
+        return False
+    file_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(CACHE_FILE))
+    return file_age < timedelta(hours=CACHE_EXPIRY_HOURS)
+
+
+def download_instruments():
+    """Download Dhan's instrument master CSV and cache it"""
+    try:
+        if is_cache_valid():
+            with open(CACHE_FILE, 'r') as f:
+                logger.info("📦 Using cached instrument data")
+                return f.read()
+        
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        logger.info("📥 Downloading instrument master...")
+        
+        with urlopen(url, timeout=10) as response:
+            data = response.read().decode('utf-8')
+        
+        # Cache the data
+        with open(CACHE_FILE, 'w') as f:
+            f.write(data)
+        
+        logger.info("✅ Downloaded and cached instrument data")
+        return data
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to download instruments: {e}")
+        # Try to use cache even if expired
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r') as f:
+                logger.info("📦 Using expired cache as fallback")
+                return f.read()
+        return None
+
+
+def get_security_id_from_sheet(symbol):
+    """Get security ID from Dhan's instrument master sheet"""
+    data = download_instruments()
+    if not data:
+        logger.warning("⚠️  Could not load instrument data, using hardcoded mapping")
+        return SYMBOL_TO_ID.get(symbol)
+    
+    try:
+        reader = csv.reader(StringIO(data))
+        header = next(reader)
+        
+        idx_exchange = header.index('SEM_EXM_EXCH_ID')
+        idx_type = header.index('SEM_EXCH_INSTRUMENT_TYPE')
+        idx_sec_id = header.index('SEM_SMST_SECURITY_ID')
+        idx_symbol = header.index('SEM_TRADING_SYMBOL')
+        
+        for row in reader:
+            exchange = row[idx_exchange].strip()
+            instr_type = row[idx_type].strip()
+            base_symbol = row[idx_symbol].strip().split('-')[0]
+            
+            # NSE equity spot only
+            if exchange == 'NSE' and instr_type == 'ES' and base_symbol == symbol:
+                sec_id = row[idx_sec_id].strip()
+                logger.info(f"📊 Found {symbol} -> Security ID: {sec_id} (from sheet)")
+                return sec_id
+        
+        logger.warning(f"⚠️  {symbol} not found in sheet, using hardcoded mapping")
+        return SYMBOL_TO_ID.get(symbol)
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing instruments: {e}")
+        logger.warning(f"⚠️  Using hardcoded mapping for {symbol}")
+        return SYMBOL_TO_ID.get(symbol)
 
 app = FastAPI()
-secret_client = secretmanager.SecretManagerServiceClient()
+dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 
-# --------- Helpers for Secret Manager --------- #
-
-def _project_id() -> str:
-    # In Cloud Run this env var is available
-    return (
-        os.environ.get("GOOGLE_CLOUD_PROJECT")
-        or os.environ.get("GCP_PROJECT")
-        or ""
-    )
-
-def get_secret(secret_id: str) -> str:
-    """
-    Read latest version of a secret from Secret Manager.
-    """
-    name = f"projects/{_project_id()}/secrets/{secret_id}/versions/latest"
-    response = secret_client.access_secret_version(name=name)
-    return response.payload.data.decode("utf-8")
-
-def set_secret(secret_id: str, value: str) -> None:
-    """
-    Add a new version to an existing secret.
-    """
-    parent = f"projects/{_project_id()}/secrets/{secret_id}"
-    secret_client.add_secret_version(
-        parent=parent,
-        payload={"data": value.encode("utf-8")},
-    )
-
-# --------- Webhook endpoint from TradingView --------- #
 
 @app.post("/webhook")
-async def tradingview_webhook(request: Request):
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-    # 1) Validate secret from TradingView
-    tv_secret = payload.get("secret")
-    expected_secret = get_secret("TV_WEBHOOK_SECRET")
-    if tv_secret != expected_secret:
+async def webhook(request: Request):
+    """Receive TradingView alert and place order on Dhan"""
+    payload = await request.json()
+    logger.info(f"📨 Webhook received: {json.dumps(payload, indent=2)}")
+    
+    if payload.get("secret") != WEBHOOK_SECRET:
+        logger.warning(f"❌ Invalid secret: {payload.get('secret')}")
         raise HTTPException(status_code=401, detail="Invalid secret")
-
-    # --- extract top-level fields coming from TradingView --- #
-    # symbol often comes like "NSE:NIITLTD" → Dhan wants just "NIITLTD"
-    raw_symbol = str(payload.get("symbol") or "")
-    tv_symbol = raw_symbol.split(":")[-1] if raw_symbol else ""
-
-    tv_exchange = str(payload.get("exchange") or "NSE")
-
-    strategy = payload.get("strategy", {}) or {}
-    action = (strategy.get("action") or "").lower()
-    abs_qty_str = strategy.get("abs_qty") or "0"
-
+    
+    symbol = payload.get("symbol", "").upper()
+    strategy = payload.get("strategy", {})
+    action = strategy.get("action", "").upper()
+    
+    logger.info(f"Extracted: symbol={symbol}, action={action}")
+    
     try:
-        abs_qty = int(float(abs_qty_str))
-    except ValueError:
-        abs_qty = 0
-
-    if action not in ("buy", "sell") or abs_qty <= 0:
-        # Nothing to send to Dhan, just ack
-        return {"success": True, "message": "No trade action / qty <= 0"}
-
-    # 2) Map TradingView action -> Dhan transactionType
-    transaction_type = "B" if action == "buy" else "S"
-
-    # 3) Build Dhan multi_leg_order for EQ segment using values from TradingView
-    dhan_order = {
-        "secret": expected_secret,                # same secret configured in Dhan TV webhook
-        "alertType": "multi_leg_order",
-        "order_legs": [
-            {
-                "transactionType": transaction_type,   # "B" or "S"
-                "orderType": "MKT",
-                "quantity": str(abs_qty),             # qty from TV
-                "exchange": tv_exchange or "NSE",
-                "symbol": tv_symbol,                  # e.g. "NIITLTD"
-                "instrument": "EQ",
-                "productType": "I",
-                "sort_order": "1",
-                "price": "0"
+        quantity = int(strategy.get("abs_qty", 0))
+    except (ValueError, TypeError):
+        logger.warning(f"❌ Invalid quantity: {strategy.get('abs_qty')}")
+        return {"success": False, "error": "Invalid quantity: must be a number"}
+    
+    logger.info(f"Quantity: {quantity}")
+    
+    if not symbol or not action or quantity <= 0:
+        logger.warning(f"❌ Invalid input: symbol={symbol}, action={action}, qty={quantity}")
+        return {"success": False, "error": "Invalid input"}
+    
+    if action not in ["BUY", "SELL"]:
+        logger.warning(f"❌ Invalid action: {action}")
+        return {"success": False, "error": "Invalid action"}
+    
+    # Get security ID from sheet or hardcoded mapping
+    sec_id = get_security_id_from_sheet(symbol)
+    
+    if not sec_id:
+        logger.warning(f"❌ Unknown symbol: {symbol}")
+        return {"success": False, "error": f"Symbol {symbol} not found"}
+    
+    try:
+        logger.info(f"📊 Placing {action} order: symbol={symbol}, sec_id={sec_id}, qty={quantity}")
+        
+        response = dhan.place_order(
+            security_id=sec_id,
+            exchange_segment=dhan.NSE,
+            transaction_type=dhan.BUY if action == "BUY" else dhan.SELL,
+            quantity=quantity,
+            order_type=dhan.MARKET,
+            product_type=dhan.INTRA,
+            price=0
+        )
+        
+        logger.info(f"📈 Dhan response: {json.dumps(response, indent=2)}")
+        
+        if response.get("status") == "success":
+            order_data = response.get("data", {})
+            order_id = order_data.get("orderId")
+            order_status = order_data.get("orderStatus", "UNKNOWN")
+            error_desc = order_data.get("omsErrorDescription", "")
+            
+            logger.info(f"Order ID: {order_id}, Status: {order_status}")
+            
+            if order_status == "REJECTED":
+                logger.error(f"❌ Order rejected: {error_desc}")
+                return {
+                    "success": False,
+                    "order_id": order_id,
+                    "error": error_desc or "Order rejected by exchange"
+                }
+            
+            logger.info(f"✅ Order placed: {order_id}, Status: {order_status}")
+            return {
+                "success": True,
+                "order_id": order_id,
+                "symbol": symbol,
+                "action": action,
+                "quantity": quantity,
+                "order_status": order_status
             }
-        ]
-    }
+        
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"❌ Order failed: {error_msg}")
+        return {"success": False, "error": error_msg}
+    except Exception as e:
+        logger.error(f"❌ Exception: {str(e)}", exc_info=True)
+        return {"success": False, "error": str(e)}
 
-    dhan_webhook_url = get_secret("DHAN_TV_WEBHOOK_URL")
 
-    # 4) Send to Dhan webhook
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            resp = await client.post(dhan_webhook_url, json=dhan_order)
-        except httpx.RequestError as e:
-            # Network / DNS / timeout issues
-            raise HTTPException(status_code=502, detail=f"Dhan webhook error: {e}")
-
-    # Forward relevant info back to TV/logs
-    return JSONResponse(
-        {
-            "success": resp.status_code == 200,
-            "status_code": resp.status_code,
-            "dhan_response": resp.text,
-        },
-        status_code=200,
-    )
-
-# --------- Daily token refresh endpoint (called by Cloud Scheduler) --------- #
-
-@app.post("/refresh-dhan-token")
-async def refresh_dhan_token():
-    """
-    Refresh Dhan API access token via /v2/RenewToken and store in Secret Manager.
-
-    This assumes DHAN_ACCESS_TOKEN initially holds a VALID token
-    generated from Dhan Web, then we keep renewing it daily.
-    """
-    dhan_client_id = get_secret("DHAN_CLIENT_ID")
-    current_token = get_secret("DHAN_ACCESS_TOKEN")
-
-    url = "https://api.dhan.co/v2/RenewToken"
-    headers = {
-        "access-token": current_token,
-        "dhanClientId": dhan_client_id,
-    }
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.get(url, headers=headers)
-
-    if resp.status_code != 200:
-        # Log the error body so you can debug from Cloud Logging
-        return JSONResponse(
-            {
-                "success": False,
-                "message": "Failed to renew token",
-                "status_code": resp.status_code,
-                "body": resp.text,
-            },
-            status_code=500,
-        )
-
-    data = resp.json()
-    # New token is usually in 'token' or 'accessToken'
-    new_token = data.get("token") or data.get("accessToken")
-
-    if not new_token:
-        return JSONResponse(
-            {
-                "success": False,
-                "message": "RenewToken response missing token field",
-                "raw": data,
-            },
-            status_code=500,
-        )
-
-    # Store new token as a new version
-    set_secret("DHAN_ACCESS_TOKEN", new_token)
-
-    return {
-        "success": True,
-        "message": "Dhan access token renewed",
-    }
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
