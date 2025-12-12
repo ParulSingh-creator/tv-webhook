@@ -27,3 +27,44 @@ google-cloud-secret-manager
 }
 
 
+{
+  "secret": "NzDyE",
+  "ticker": "{{ticker}}",
+  "exchange": "{{exchange}}",
+  "interval": "{{interval}}",
+  "bar_time": "{{time}}",
+  "alert_time": "{{timenow}}",
+  "close": "{{close}}",
+
+  "strategy": {
+    "name": "9:15 Open Reverse-If-SL ADX+ROC",
+    "order_id": "{{strategy.order.id}}",
+    "action": "{{strategy.order.action}}",
+    "contracts": "{{strategy.order.contracts}}",
+    "abs_qty": "{{strategy.order.contracts > 0 ? strategy.order.contracts : strategy.order.contracts * -1}}",
+    "position_size": "{{strategy.position_size}}",
+    "market_position": "{{strategy.market_position}}",
+    "comment": "{{strategy.order.comment}}",
+    "open_915": "{{plot_open_915}}",
+    "buy_trigger": "{{plot_buy_trigger}}",
+    "sell_trigger": "{{plot_sell_trigger}}",
+    "buy_initial_sl": "{{plot_buy_initial_sl}}",
+    "sell_initial_sl": "{{plot_sell_initial_sl}}",
+    "qty": "{{plot_qty}}",
+    "base_qty": "{{plot_base_qty}}",
+    "trades_today": "{{plot_trades_today}}",
+    "immediate_915_done": "{{plot_immediate_915_done}}",
+    "first_trade_side": "{{plot_first_trade_side}}",
+    "first_trade_sl_hit": "{{plot_first_trade_sl_hit}}",
+    "current_stop": "{{plot_current_stop}}",
+    "current_tp": "{{plot_current_tp}}",
+    "trail_tier": "{{plot_trail_tier}}",
+    "adx": "{{plot_adx}}",
+    "pdi": "{{plot_pdi}}",
+    "mdi": "{{plot_mdi}}",
+    "roc": "{{plot_roc}}"
+  }
+}
+
+
+
