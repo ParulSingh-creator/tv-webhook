@@ -2,3 +2,28 @@ fastapi
 uvicorn[standard]
 httpx
 google-cloud-secret-manager
+
+
+
+{
+  "secret": "NzDyE",
+  "symbol": "{{ticker}}",
+  "interval": "{{interval}}",
+  "exchange": "{{exchange}}",
+  "bar_time": "{{time}}",
+  "alert_time": "{{timenow}}",
+  "close": "{{close}}",
+  "strategy": {
+    "name": "9:15 Open Reverse-If-SL ADX+ROC",
+    "order_id": "{{strategy.order.id}}",
+    "action": "{{strategy.order.action}}",
+    "contracts": "{{strategy.order.contracts}}",
+    "abs_qty": "{{math.floor(600000 / open)}}",
+    "avg_price": "{{strategy.order.price}}",
+    "position_size": "{{strategy.position_size}}",
+    "market_position": "{{strategy.market_position}}",
+    "comment": "{{strategy.order.comment}}"
+  }
+}
+
+
